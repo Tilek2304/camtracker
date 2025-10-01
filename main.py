@@ -42,7 +42,7 @@ def run(model: str, min_detection_confidence: float, min_suppression_threshold: 
     servo_y_pin = 18
 
     # Инициализация PCA9685
-    pca = Adafruit_PCA9685.PCA9685()
+    pca = Adafruit_PCA9685.PCA9685(address=0x40,busnum=1)
     pca.set_pwm_freq(60)
 
     # Инициализация шагового двигателя через PCA9685
@@ -161,4 +161,5 @@ def error(windowMax, x):
     return adjustment_magnitude, adjustment_direction
 
 if __name__ == '__main__':
+
     run("detector.tflite", 0.6, 0.6)
