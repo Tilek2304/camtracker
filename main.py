@@ -2,213 +2,178 @@ import cv2
 import numpy as np
 import time
 from adafruit_servokit import ServoKit
-from gpiozero import AngularServo
-import RPi.GPIO as GPIO
-import time
-import math # Для функции abs()
-# import board
-# import busio
-# import adafruit_pca9685
+from adafruit_motor import stepper
+# Import Stepper class for Stepper motor control
+from adafruit_motor.stepper import StepperMotor
 
-# i2c = busio.I2C(board.SCL, board.SDA)
-# pca = adafruit_pca9685.PCA9685(i2c)
+# Инициализация ServoKit.
+# В этом случае предполагается, что вы используете PCA9685 как "PWM source" для StepperMotor.
+# Для 28BYJ-48 потребуется внешний драйвер ULN2003,
+# который будет подключен к каналам PCA9685.
+kit = ServoKit(channels=16, address=0x6F)
 
-XMOTOR = [4,5,6,7]
-FHAND = [8,9,10,11]
-SHAND = [12,13,14,15]
-ANGLEDIR = {
-"XMCURRENT_MOTOR_ANGLE" : 90,
-"FMCURRENT_MOTOR_ANGLE" : 90,
-"SMCURRENT_MOTOR_ANGLE" : 90,
-}
-STEPS_PER_REVOLUTION = 4096 # 28BYJ-48 (Half-step)
-HALF_STEP_SEQ = [
-    [1, 0, 0, 0], [1, 1, 0, 0], [0, 1, 0, 0], [0, 1, 1, 0],
-    [0, 0, 1, 0], [0, 0, 1, 1], [0, 0, 0, 1], [1, 0, 0, 1]
-]
+# Каналы для Tilt Servo и Laser
+TILT_CHANNEL, LASER_CHANNEL = 4, 15 # TILT изменен на 4, чтобы освободить 0-3 для шаговика
 
-# GPIO.setmode(GPIO.BCM)
-# for pin in FHAND:
-#     GPIO.setup(pin, GPIO.OUT)
-#     GPIO.output(pin, 0)
-# for pin in SHAND:
-#     GPIO.setup(pin, GPIO.OUT)
-#     GPIO.output(pin, 0)
-# for pin in XMOTOR:
-#     GPIO.setup(pin, GPIO.OUT)
-#     GPIO.output(pin, 0)
+# Каналы для шагового двигателя PAN (28BYJ-48)
+# Шаговый двигатель использует 4 канала. Здесь используются каналы 0, 1, 2, 3
+COIL_A_1 = kit._pca.channels[0]
+COIL_A_2 = kit._pca.channels[1]
+COIL_B_1 = kit._pca.channels[2]
+COIL_B_2 = kit._pca.channels[3]
 
-def rotateM(MOTOR_PINS, target_degree, dickey, delay=0.001):
-    """
-    Вращает шаговый двигатель на заданный абсолютный угол (0-180),
-    вычисляя направление и смещение относительно текущего положения.
+# Создание объекта шагового двигателя
+pan_motor = StepperMotor(COIL_A_1, COIL_A_2, COIL_B_1, COIL_B_2, microsteps=False)
 
-    :param target_degree: Целевой угол (например, 120 или 60).
-    :param delay: Задержка между шагами.
-    """
-    global ANGLEDIR
-    CURRENT_MOTOR_ANGLE = ANGLEDIR.get(dickey)
-    # 1. Вычисляем требуемое смещение (разница между целевым и текущим углом)
-    degree_change = target_degree - CURRENT_MOTOR_ANGLE
-    
-    # Если смещение равно 0, ничего не делаем
-    if degree_change == 0:
-        print(f"Двигатель уже на {target_degree}°.")
-        return
-    elif degree_change > 0:
-        # target_degree > CURRENT_MOTOR_ANGLE (например, с 90 на 120)
-        direction = 'forward' # По часовой
-        degrees = degree_change
-    else:
-        # target_degree < CURRENT_MOTOR_ANGLE (например, с 90 на 60)
-        direction = 'backward' # Против часовой
-        degrees = abs(degree_change) # Всегда используем положительное значение для градусов
-        
-    # Преобразуем градусы в шаги
-    steps_to_take = int((STEPS_PER_REVOLUTION / 360.0) * degrees)
-    
-    # 3. Выполняем шаги (та же логика, что и ранее)
-    step_sequence = HALF_STEP_SEQ
-    if direction == 'backward':
-        step_sequence = HALF_STEP_SEQ[::-1] # Инвертируем последовательность
-        
-    current_step = 0
-    
-    print(f"Перемещение с {CURRENT_MOTOR_ANGLE}° на {target_degree}° ({degrees}°, {direction}, {steps_to_take} шагов)...")
-    
-# 3. Выполняем шаги
-    current_step = 0 
+# Шаговый двигатель 28BYJ-48 (в полношаговом режиме) имеет примерно 2048 шагов на оборот (360 градусов).
+# Это дает 360 / 2048 ≈ 0.176 градуса на шаг.
+# Нам нужно установить максимальный угол поворота, чтобы ограничить движение.
+STEPS_PER_REV = 2048
+PAN_DEGREE_PER_STEP = 360 / STEPS_PER_REV
+PAN_ANGLE_MIN_DEG, PAN_ANGLE_MAX_DEG = 5, 175 # Углы в градусах
+# Переводим углы в шаги для ограничения.
+PAN_STEP_MIN = int(PAN_ANGLE_MIN_DEG / PAN_DEGREE_PER_STEP)
+PAN_STEP_MAX = int(PAN_ANGLE_MAX_DEG / PAN_DEGREE_PER_STEP)
 
-    for _ in range(steps_to_take):
-        # 1. Определяем, какой из 8 микро-шагов нужно выполнить сейчас
-        step_index = current_step % 8 
-        pins_on_off = step_sequence[step_index] # Получаем комбинацию [1, 0, 0, 0] и т.п.
+pan_steps = int(90 / PAN_DEGREE_PER_STEP) # Текущая позиция в шагах (90 градусов)
+# pan_motor.release() # Шаговый двигатель не нужно двигать на старте, только Tilt
+# Шаговый двигатель 28BYJ-48 сохраняет позицию, когда на него подается ток.
 
-        # 2. Подаем эту комбинацию на 4 пина PCA9685
-        for j in range(4):
-            pca_channel = MOTOR_PINS[j]
-            if pins_on_off[j] == 1:
-                kit._pca.channels[pca_channel].duty_cycle = 65535
-            else:
-                kit._pca.channels[pca_channel].duty_cycle = 0
-        
-    time.sleep(delay)
-    
-    # 3. Увеличиваем счетчик, чтобы на следующей итерации взять следующую комбинацию
-    current_step += 1 
-        
-    # 4. Выключаем пины и обновляем текущий угол
-    for pin in MOTOR_PINS:
-        kit._pca.channels[pin].duty_cycle = 0
-        
-    ANGLEDIR[dickey] = target_degree # Обновляем текущий угол
-    print(f"Двигатель перемещен. Новый угол: {CURRENT_MOTOR_ANGLE}°.")
+TILT_ANGLE_MIN, TILT_ANGLE_MAX = 50, 120
 
+tilt_angle = 75 # Установить начальный угол для Tilt-серво
+kit.servo[TILT_CHANNEL].angle = tilt_angle # Переместить Tilt-серво в начальное положение
+kit._pca.channels[LASER_CHANNEL].duty_cycle = 0 # Лазер выключен
 
-kit = ServoKit(channels=16, address=0x40) # Initialize servo controller
-# servo = AngularServo(18,min_angle=-90, max_angle=90, min_pulse_width=0.0006, max_pulse_width=0.0024)
-TILT_CHANNEL, LASER_CHANNEL  =  0, 1 # Channels for servo control
-PAN_ANGLE_MIN, PAN_ANGLE_MAX = 5, 175 # Servo angles range of motion
-TILT_ANGLE_MIN, TILT_ANGLE_MAX = 5, 175
-pan_angle = 90 # Set initial angles for servos
-tilt_angle = 90
-# servo.angle(tilt_angle)
-# kit.servo[PAN_CHANNEL].angle = pan_angle # Move servos to initial angle
-kit.servo[TILT_CHANNEL].angle = tilt_angle
-# kit._pca.channels[LASER_CHANNEL].duty_cycle = 0 #from 0 to 65535
+face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml') # Используемая модель
 
-face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml') #Model used
+cols, rows = 640, 480
+setpoint = cols // 40 # Окно, в котором считается, что цель достигнута
+# PID для PAN (теперь управляет шагами)
+PAN_KP, PAN_KI, PAN_KD = 0.0081 * 0.5, 0.0, 0.0 # Меньше, т.к. шаг меньше
+# PID для TILT (управляет углом серво)
+TILT_KP, TILT_KI, TILT_KD = 0.008, 0.0, 0.0
 
-cols, rows = 640, 480 # 640x480, (0.55 352x288) or( 0.5 320x240)  (0.8 512, 384)(0.7 448, 336)(0.6 384, 288)
-setpoint=cols//40
-# PAN_KP,PAN_KI,PAN_KD = 0.014, 0.0, 0.0 # for 352x288
-# TILT_KP,TILT_KI,TILT_KD = 0.012, 0.0, 0.0 #0.12
-PAN_KP,PAN_KI,PAN_KD = 0.0081, 0.0, 0.0 # PID for 640x480
-TILT_KP,TILT_KI,TILT_KD = 0.008, 0.0, 0.0 
-pan_integral = 0.0 # Initialize the PID controllers for pan and tilt
+pan_integral = 0.0
 pan_last_time = time.time()
 tilt_integral = 0.0
 tilt_last_time = time.time()
-pan_error_prior = 0.0 # Initialize the initial error values
+pan_error_prior = 0.0
 tilt_error_prior = 0.0
 
-panTarget, tiltTarget=0, 0 # how many count in target area
+inTarget = 0 # Счетчик нахождения в цели
 
-def calculate_pid(error, kp, ki, kd, integral, last_time, error_prior): # PID control function
+def calculate_pid(error, kp, ki, kd, integral, last_time, error_prior): # Функция PID-регулятора
     current_time = time.time()
-    delta_time = current_time - last_time
+    # Защита от деления на ноль, если delta_time слишком мало.
+    delta_time = max(current_time - last_time, 0.0001)
 
     proportional = error
     integral += error * delta_time
+    # Ограничить integral, чтобы избежать windup
+    integral = np.clip(integral, -100, 100)
     derivative = (error - error_prior) / delta_time
 
     output = kp * proportional + ki * integral + kd * derivative
 
     return output, integral, current_time
 
-cap = cv2.VideoCapture(0) # Initialize the video capture
-cap.set(3, cols)  
-cap.set(4, rows)  
+cap = cv2.VideoCapture(0) # Инициализация видеозахвата
+cap.set(3, cols)
+cap.set(4, rows)
 
-pTime = 0.0 #time tracking for FPS
+pTime = 0.0 # Отслеживание времени для FPS
 cTime = 0.0
-fps=0.0
+fps = 0.0
 
 while True:
-    ret, frame = cap.read() # Read the frame from the video capture
+    ret, frame = cap.read() # Чтение кадра
     frame = cv2.flip(frame, 0)
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) # Convert the frame to grayscalen
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=5) # Perform face detection
-    for (x, y, w, h) in faces:
-        face_center_x = x + w // 2 # Calculate the center of the face
-        face_center_y = y + h // 2
-        # Calculate error for pan and tilt
-        pan_error = face_center_x - cols // 2
-        tilt_error = face_center_y - rows // 2
-#            print(format(pan_error, ".2f"))
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) # Преобразование в оттенки серого
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=5) # Обнаружение лиц
 
-        if abs(pan_error)> setpoint: # Perform PID control to calculate pan and tilt angles
-            pan_output, pan_integral, pan_last_time = calculate_pid(pan_error, PAN_KP, PAN_KI, PAN_KD, pan_integral, pan_last_time, pan_error_prior)
-            pan_angle = np.clip(pan_angle + pan_output, PAN_ANGLE_MIN, PAN_ANGLE_MAX)
-            rotateM(XMOTOR, pan_angle, 'XMCURRENT_MOTOR_ANGLE')
-#            print(pan_error)
-        if abs(tilt_error)>setpoint:
-            tilt_output, tilt_integral, tilt_last_time = calculate_pid(tilt_error, TILT_KP, TILT_KI, TILT_KD, tilt_integral, tilt_last_time, tilt_error_prior)
-            tilt_angle = np.clip(tilt_angle + tilt_output, TILT_ANGLE_MIN, TILT_ANGLE_MAX) # Adjust tilt angles based on PID output
-            kit.servo[1].angle =tilt_angle
-            # servo.angle(tilt_angle+90)
-            
-        if abs(pan_error)<setpoint and abs(tilt_error)<setpoint: 
-            inTarget=inTarget+1
-            if inTarget>15: #in target for a period of time, say 15 counts
-                # kit._pca.channels[LASER_CHANNEL].duty_cycle = 65535
-                print('something wrong ' + inTarget)
-        else:
-            inTarget=0 # reset target count if move out
-            # kit._pca.channels[LASER_CHANNEL].duty_cycle = 0
-            
-        pan_error_prior = pan_error # Update the error_prior values for the next iteration
-        tilt_error_prior = tilt_error
-        
-        cv2.rectangle(frame,(cols//2-setpoint, rows//2-setpoint),(cols//2+setpoint, rows//2+setpoint),(0,255,0),1) #draw setpoint box
-        cv2.line(frame, (face_center_x, 0), (face_center_x, rows), (0, 255, 255), 1) #draw moving cross
-        cv2.line(frame, (0, face_center_y), (cols, face_center_y), (0, 255, 255), 1) 
-        cv2.circle(frame, (face_center_x, face_center_y), 50, (0, 255, 255), 1)
-
-        cTime = time.time() # calculate and display FPS
-        fps = 0.9*fps+0.1*(1/(cTime-pTime))
-
-        pTime = cTime
-        cv2.putText(frame, f"FPS : {int(fps)}", (10, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-        print(int(fps))
-    cv2.imshow('Face Tracking', frame) # Show the frame
-    
-    if cv2.waitKey(1) & 0xFF == 27: # Break the loop when 'q' is pressed
+    if not ret:
+        print("Не удалось прочитать кадр с камеры")
         break
 
-rotateM(XMOTOR,90,'XMCURRENT_MOTOR_ANGLE') # Reset the servos to their starting positions and turn off laser
-# servo.angle(0)
+    if len(faces) > 0:
+        (x, y, w, h) = faces[0] # Берем первое обнаруженное лицо
+        face_center_x = x + w // 2 # Центр лица
+        face_center_y = y + h // 2
+        
+        # Вычисление ошибки
+        pan_error = face_center_x - cols // 2
+        tilt_error = face_center_y - rows // 2
+
+        # --- Управление PAN (Шаговый двигатель) ---
+        if abs(pan_error) > setpoint:
+            pan_output, pan_integral, pan_last_time = calculate_pid(pan_error, PAN_KP, PAN_KI, PAN_KD, pan_integral, pan_last_time, pan_error_prior)
+            
+            # Конвертируем выход PID (пиксели) в шаги
+            # Мы хотим, чтобы output (в пикселях) был преобразован в количество шагов для двигателя.
+            # pan_output / (cols/2) * MAX_STEP_CHANGE (максимальное изменение шагов)
+            # Упрощенно: преобразуем выход в шаги, где 1 пиксель ошибки = k шагов
+            steps_to_move = int(pan_output * 0.005) # Коэффициент 0.005 подобран эмпирически
+            
+            # Ограничиваем изменение шагов, чтобы не было слишком быстрого движения
+            steps_to_move = np.clip(steps_to_move, -50, 50)
+            
+            pan_steps += steps_to_move
+            pan_steps = np.clip(pan_steps, PAN_STEP_MIN, PAN_STEP_MAX)
+            
+            # Двигаем шаговый двигатель
+            if steps_to_move > 0:
+                # Вправо: steps.FORWARD или steps.BACKWARD, в зависимости от подключения
+                pan_motor.onestep(direction=stepper.FORWARD) 
+            elif steps_to_move < 0:
+                # Влево
+                pan_motor.onestep(direction=stepper.BACKWARD)
+
+        # --- Управление TILT (Сервопривод) ---
+        if abs(tilt_error) > setpoint:
+            tilt_output, tilt_integral, tilt_last_time = calculate_pid(tilt_error, TILT_KP, TILT_KI, TILT_KD, tilt_integral, tilt_last_time, tilt_error_prior)
+            
+            tilt_angle = np.clip(tilt_angle + tilt_output, TILT_ANGLE_MIN, TILT_ANGLE_MAX)
+            kit.servo[TILT_CHANNEL].angle = tilt_angle
+        
+        # --- Управление Лазером ---
+        if abs(pan_error) < setpoint and abs(tilt_error) < setpoint:
+            inTarget += 1
+            if inTarget > 15: # В цели в течение определенного периода времени
+                kit._pca.channels[LASER_CHANNEL].duty_cycle = 65535 # Включить лазер
+        else:
+            inTarget = 0 # Сбросить счетчик, если цель покинута
+            kit._pca.channels[LASER_CHANNEL].duty_cycle = 0 # Выключить лазер
+            
+        pan_error_prior = pan_error # Обновление предыдущей ошибки
+        tilt_error_prior = tilt_error
+        
+        # Отрисовка
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2) # Прямоугольник вокруг лица
+        cv2.rectangle(frame, (cols // 2 - setpoint, rows // 2 - setpoint), (cols // 2 + setpoint, rows // 2 + setpoint), (0, 255, 0), 1)
+        cv2.line(frame, (face_center_x, 0), (face_center_x, rows), (0, 255, 255), 1)
+        cv2.line(frame, (0, face_center_y), (cols, face_center_y), (0, 255, 255), 1)
+        cv2.circle(frame, (face_center_x, face_center_y), 50, (0, 255, 255), 1)
+    else:
+        # Если лицо не найдено, выключить лазер и освободить шаговый двигатель
+        kit._pca.channels[LASER_CHANNEL].duty_cycle = 0
+        pan_motor.release() # Снять напряжение с обмоток шагового двигателя
+
+    # FPS
+    cTime = time.time()
+    fps = 0.9 * fps + 0.1 * (1 / (cTime - pTime))
+    pTime = cTime
+    cv2.putText(frame, f"FPS : {int(fps)}", (10, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+    # print(int(fps))
+    
+    cv2.imshow('Face Tracking', frame) # Показать кадр
+    
+    if cv2.waitKey(1) & 0xFF == 27: # Выход по Esc
+        break
+
+# Очистка
 kit.servo[TILT_CHANNEL].angle = 90
+pan_motor.release() # Освободить шаговый двигатель
 kit._pca.channels[LASER_CHANNEL].duty_cycle = 0
-cap.release() # Release the video capture and clean up
+cap.release()
 cv2.destroyAllWindows()
