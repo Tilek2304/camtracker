@@ -1,165 +1,205 @@
-import sys
-import time
 import cv2
-import mediapipe as mp
-
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
-
-# Локальные импорты
-from utils import visualize
-from stepper_pca import Stepper28BYJ_PCA
-from opencv_multiplot import Plotter
-
-# Зависимости для оборудования
+import numpy as np
+import time
+from adafruit_servokit import ServoKit
 from gpiozero import AngularServo
-from gpiozero.pins.pigpio import PiGPIOFactory
-import Adafruit_PCA9685
+import RPi.GPIO as GPIO
+import time
+import math # Для функции abs()
+# import board
+# import busio
+# import adafruit_pca9685
 
-# Глобальные переменные для FPS
-COUNTER, FPS = 0, 0
-START_TIME = time.time()
-DETECTION_RESULT = None
+# i2c = busio.I2C(board.SCL, board.SDA)
+# pca = adafruit_pca9685.PCA9685(i2c)
 
-# Переменные для ПИД-контроллера
-yErrorSum, yErrorPrev = 0, 0
-xErrorSum, xErrorPrev = 0, 0
-cord = (0, 0)
+XMOTOR = [5,6,7,8]
+FHAND = [9,10,11,12]
+SHAND = [13,14,15,16]
+XMCURRENT_MOTOR_ANGLE = 90
+FMCURRENT_MOTOR_ANGLE = 90
+SMCURRENT_MOTOR_ANGLE = 90
+STEPS_PER_REVOLUTION = 4096 # 28BYJ-48 (Half-step)
+HALF_STEP_SEQ = [
+    [1, 0, 0, 0], [1, 1, 0, 0], [0, 1, 0, 0], [0, 1, 1, 0],
+    [0, 0, 1, 0], [0, 0, 1, 1], [0, 0, 0, 1], [1, 0, 0, 1]
+]
 
-def run(model: str, min_detection_confidence: float, min_suppression_threshold: float) -> None:
-    global yErrorPrev, yErrorSum, xErrorPrev, xErrorSum, cord
+# GPIO.setmode(GPIO.BCM)
+# for pin in FHAND:
+#     GPIO.setup(pin, GPIO.OUT)
+#     GPIO.output(pin, 0)
+# for pin in SHAND:
+#     GPIO.setup(pin, GPIO.OUT)
+#     GPIO.output(pin, 0)
+# for pin in XMOTOR:
+#     GPIO.setup(pin, GPIO.OUT)
+#     GPIO.output(pin, 0)
 
-    # --- Инициализация камеры (ИЗМЕНЕНО) ---
-    # Захват видео с USB-камеры (индекс 0 - обычно камера по умолчанию)
-    cap = cv2.VideoCapture(0)
-    # Установка желаемого разрешения
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+def rotateM(MOTOR_PINS, target_degree, CURRENT_MOTOR_ANGLE, delay=0.001):
+    """
+    Вращает шаговый двигатель на заданный абсолютный угол (0-180),
+    вычисляя направление и смещение относительно текущего положения.
 
-
-    # --- Инициализация оборудования ---
-    stepper_x_channels = [0, 1, 2, 3] 
-    servo_y_pin = 18
-
-    # Инициализация PCA9685
-    pca = Adafruit_PCA9685.PCA9685(address=0x40,busnum=1)
-    pca.set_pwm_freq(60)
-
-    # Инициализация шагового двигателя через PCA9685
-    stepper = Stepper28BYJ_PCA(pca, stepper_x_channels)
-
-    # Инициализация сервопривода
-    pigpio_factory = PiGPIOFactory()
-    servo = AngularServo(servo_y_pin, pin_factory=pigpio_factory)
+    :param target_degree: Целевой угол (например, 120 или 60).
+    :param delay: Задержка между шагами.
+    """
     
-    servoDegree = 0
-    servo.angle = servoDegree
-    time.sleep(2)
-
-    # --- Параметры визуализации ---
-    row_size = 50
-    left_margin = 24
-    text_color = (0, 255, 0)
-    font_size = 1
-    font_thickness = 1
-    fps_avg_frame_count = 10
-
-    def save_result(result: vision.FaceDetectorResult, unused_output_image: mp.Image, timestamp_ms: int):
-        global FPS, COUNTER, START_TIME, DETECTION_RESULT
-        if COUNTER % fps_avg_frame_count == 0:
-            FPS = fps_avg_frame_count / (time.time() - START_TIME)
-            START_TIME = time.time()
-        DETECTION_RESULT = result
-        COUNTER += 1
-
-    # --- Инициализация модели MediaPipe ---
-    base_options = python.BaseOptions(model_asset_path=model)
-    options = vision.FaceDetectorOptions(base_options=base_options,
-                                          running_mode=vision.RunningMode.LIVE_STREAM,
-                                          min_detection_confidence=min_detection_confidence,
-                                          min_suppression_threshold=min_suppression_threshold,
-                                          result_callback=save_result)
-    detector = vision.FaceDetector.create_from_options(options)
-
-    # --- Инициализация плоттера ---
-    plot = Plotter(700, 250, 4)
-    plot.setValName(["Y value", "Y setpoint", "X value", "X setpoint"])
-
-    # --- Основной цикл ---
-    while True:
-        # Захват кадра с USB-камеры (ИЗМЕНЕНО)
-        success, image = cap.read()
-        if not success:
-            sys.stderr.write("Не удалось получить кадр с камеры.")
-            continue
-
-        image = cv2.flip(image, 1)
-        
-        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
-        detector.detect_async(mp_image, time.time_ns() // 1_000_000)
-
-        current_frame = image
-        
-        if DETECTION_RESULT and len(DETECTION_RESULT.detections):
-            current_frame, cord = visualize(current_frame, DETECTION_RESULT)
-            
-            yError, ydir = error(current_frame.shape[0], cord[1])
-            xError, xdir = error(current_frame.shape[1], cord[0])
-
-            # --- Логика ПИД-регулятора ---
-            yKp, yKi, yKd = 10, 0.003, 14
-            yP = yKp * ydir * yError
-            yErrorSum += yError
-            yI = yKi * ydir * yErrorSum
-            yD = yKd * ydir * (yError - yErrorPrev)
-            yErrorPrev = yError
-            yPidOutput = round(yP + yI + yD)
-            
-            xKp, xKi, xKd = 10, 0.003, 8
-            xP = xKp * xError
-            xErrorSum += xError
-            xI = xKi * xErrorSum
-            xD = xKd * (xError - xErrorPrev)
-            xErrorPrev = xError
-            xPidOutput = round(abs(xP + xI + xD))
-
-            # --- Управление моторами ---
-            servoDegree += yPidOutput
-            if not -90 < servoDegree < 90:
-                servoDegree = 0
-            servo.angle = servoDegree
-
-            if xdir == 1:
-                stepper.cwStepping(xPidOutput)
-            elif xdir == -1:
-                stepper.ccwStepping(xPidOutput)
-                
-            time.sleep(0.001)
-
-        # Отображение FPS
-        fps_text = f'FPS={FPS:.1f}'
-        cv2.putText(current_frame, fps_text, (left_margin, row_size), cv2.FONT_HERSHEY_DUPLEX,
-                    font_size, text_color, font_thickness, cv2.LINE_AA)
-
-        plot.multiplot([cord[1], current_frame.shape[0] // 2, cord[0], current_frame.shape[1] // 2], "PID Plot")
-        cv2.imshow('face_detection', current_frame)
-
-        if cv2.waitKey(1) == ord(' '):
-            break
+    # 1. Вычисляем требуемое смещение (разница между целевым и текущим углом)
+    degree_change = target_degree - CURRENT_MOTOR_ANGLE
     
-    # Освобождение ресурсов (ИЗМЕНЕНО)
-    detector.close()
-    cap.release()
-    cv2.destroyAllWindows()
+    # Если смещение равно 0, ничего не делаем
+    if degree_change == 0:
+        print(f"Двигатель уже на {target_degree}°.")
+        return
+        
+    # 2. Определяем направление и количество шагов
+    
+    if degree_change > 0:
+        # target_degree > CURRENT_MOTOR_ANGLE (например, с 90 на 120)
+        direction = 'forward' # По часовой
+        degrees = degree_change
+    else:
+        # target_degree < CURRENT_MOTOR_ANGLE (например, с 90 на 60)
+        direction = 'backward' # Против часовой
+        degrees = abs(degree_change) # Всегда используем положительное значение для градусов
+        
+    # Преобразуем градусы в шаги
+    steps_to_take = int((STEPS_PER_REVOLUTION / 360.0) * degrees)
+    
+    # 3. Выполняем шаги (та же логика, что и ранее)
+    step_sequence = HALF_STEP_SEQ
+    if direction == 'backward':
+        step_sequence = HALF_STEP_SEQ[::-1] # Инвертируем последовательность
+        
+    current_step = 0
+    
+    print(f"Перемещение с {CURRENT_MOTOR_ANGLE}° на {target_degree}° ({degrees}°, {direction}, {steps_to_take} шагов)...")
+    
+    for _ in range(steps_to_take):
+        pins_on_off = step_sequence[current_step % 8] 
+        for pin_index in range(4):
+            if MOTOR_PINS[pin_index] == 0:
+                kit._pca.channels[MOTOR_PINS[pin_index]].duty_cycle = 0
+            else:
+                kit._pca.channels[MOTOR_PINS[pin_index]].duty_cycle = 65535
+            # GPIO.output(MOTOR_PINS[pin_index], pins_on_off[pin_index])
+            
+        time.sleep(delay)
+        current_step += 1
+        
+    # # 4. Выключаем пины и обновляем текущий угол
+    # for pin in MOTOR_PINS:
+    #     GPIO.output(pin, 0)
+        
+    CURRENT_MOTOR_ANGLE = target_degree # Обновляем текущий угол
+    print(f"Двигатель перемещен. Новый угол: {CURRENT_MOTOR_ANGLE}°.")
 
 
-def error(windowMax, x):
-    normalised_adjustment = x / windowMax - 0.5
-    adjustment_magnitude = abs(round(normalised_adjustment, 1))
-    adjustment_direction = -1 if normalised_adjustment > 0 else 1
-    return adjustment_magnitude, adjustment_direction
+kit = ServoKit(channels=16, address=0x40) # Initialize servo controller
+servo = AngularServo(18,min_angle=-90, max_angle=90, min_pulse_width=0.0006, max_pulse_width=0.0024)
+TILT_CHANNEL, LASER_CHANNEL  =  0, 1 # Channels for servo control
+PAN_ANGLE_MIN, PAN_ANGLE_MAX = 5, 175 # Servo angles range of motion
+TILT_ANGLE_MIN, TILT_ANGLE_MAX = 5, 175
+pan_angle = 90 # Set initial angles for servos
+tilt_angle = 90
+servo.angle(tilt_angle)
+# kit.servo[PAN_CHANNEL].angle = pan_angle # Move servos to initial angle
+# kit.servo[TILT_CHANNEL].angle = tilt_angle
+# kit._pca.channels[LASER_CHANNEL].duty_cycle = 0 #from 0 to 65535
 
-if __name__ == '__main__':
+face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml') #Model used
 
-    run("detector.tflite", 0.6, 0.6)
+cols, rows = 640, 480 # 640x480, (0.55 352x288) or( 0.5 320x240)  (0.8 512, 384)(0.7 448, 336)(0.6 384, 288)
+setpoint=cols//40
+# PAN_KP,PAN_KI,PAN_KD = 0.014, 0.0, 0.0 # for 352x288
+# TILT_KP,TILT_KI,TILT_KD = 0.012, 0.0, 0.0 #0.12
+PAN_KP,PAN_KI,PAN_KD = 0.0081, 0.0, 0.0 # PID for 640x480
+TILT_KP,TILT_KI,TILT_KD = 0.008, 0.0, 0.0 
+pan_integral = 0.0 # Initialize the PID controllers for pan and tilt
+pan_last_time = time.time()
+tilt_integral = 0.0
+tilt_last_time = time.time()
+pan_error_prior = 0.0 # Initialize the initial error values
+tilt_error_prior = 0.0
+
+panTarget, tiltTarget=0, 0 # how many count in target area
+
+def calculate_pid(error, kp, ki, kd, integral, last_time, error_prior): # PID control function
+    current_time = time.time()
+    delta_time = current_time - last_time
+
+    proportional = error
+    integral += error * delta_time
+    derivative = (error - error_prior) / delta_time
+
+    output = kp * proportional + ki * integral + kd * derivative
+
+    return output, integral, current_time
+
+cap = cv2.VideoCapture(0) # Initialize the video capture
+cap.set(3, cols)  
+cap.set(4, rows)  
+
+pTime = 0.0 #time tracking for FPS
+cTime = 0.0
+fps=0.0
+
+while True:
+    ret, frame = cap.read() # Read the frame from the video capture
+    frame = cv2.flip(frame, 0)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) # Convert the frame to grayscalen
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=5) # Perform face detection
+    for (x, y, w, h) in faces:
+        face_center_x = x + w // 2 # Calculate the center of the face
+        face_center_y = y + h // 2
+        # Calculate error for pan and tilt
+        pan_error = face_center_x - cols // 2
+        tilt_error = face_center_y - rows // 2
+#            print(format(pan_error, ".2f"))
+
+        if abs(pan_error)> setpoint: # Perform PID control to calculate pan and tilt angles
+            pan_output, pan_integral, pan_last_time = calculate_pid(pan_error, PAN_KP, PAN_KI, PAN_KD, pan_integral, pan_last_time, pan_error_prior)
+            pan_angle = np.clip(pan_angle + pan_output, PAN_ANGLE_MIN, PAN_ANGLE_MAX)
+            rotateM(XMOTOR, pan_angle, XMCURRENT_MOTOR_ANGLE)
+#            print(pan_error)
+        if abs(tilt_error)>setpoint:
+            tilt_output, tilt_integral, tilt_last_time = calculate_pid(tilt_error, TILT_KP, TILT_KI, TILT_KD, tilt_integral, tilt_last_time, tilt_error_prior)
+            tilt_angle = np.clip(tilt_angle + tilt_output, TILT_ANGLE_MIN, TILT_ANGLE_MAX) # Adjust tilt angles based on PID output
+            # kit.servo[1].angle =tilt_angle
+            servo.angle(tilt_angle+90)
+            
+        if abs(pan_error)<setpoint and abs(tilt_error)<setpoint: 
+            inTarget=inTarget+1
+            if inTarget>15: #in target for a period of time, say 15 counts
+                # kit._pca.channels[LASER_CHANNEL].duty_cycle = 65535
+                print('something wrong ' + inTarget)
+        else:
+            inTarget=0 # reset target count if move out
+            # kit._pca.channels[LASER_CHANNEL].duty_cycle = 0
+            
+        pan_error_prior = pan_error # Update the error_prior values for the next iteration
+        tilt_error_prior = tilt_error
+        
+        cv2.rectangle(frame,(cols//2-setpoint, rows//2-setpoint),(cols//2+setpoint, rows//2+setpoint),(0,255,0),1) #draw setpoint box
+        cv2.line(frame, (face_center_x, 0), (face_center_x, rows), (0, 255, 255), 1) #draw moving cross
+        cv2.line(frame, (0, face_center_y), (cols, face_center_y), (0, 255, 255), 1) 
+        cv2.circle(frame, (face_center_x, face_center_y), 50, (0, 255, 255), 1)
+
+        cTime = time.time() # calculate and display FPS
+        fps = 0.9*fps+0.1*(1/(cTime-pTime))
+
+        pTime = cTime
+        cv2.putText(frame, f"FPS : {int(fps)}", (10, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+        print(int(fps))
+    cv2.imshow('Face Tracking', frame) # Show the frame
+    
+    if cv2.waitKey(1) & 0xFF == 27: # Break the loop when 'q' is pressed
+        break
+
+rotateM(XMOTOR,90,XMCURRENT_MOTOR_ANGLE) # Reset the servos to their starting positions and turn off laser
+servo.angle(0)
+# kit.servo[TILT_CHANNEL].angle = 90
+kit._pca.channels[LASER_CHANNEL].duty_cycle = 0
+cap.release() # Release the video capture and clean up
+cv2.destroyAllWindows()
