@@ -76,16 +76,26 @@ def rotateM(MOTOR_PINS, target_degree, dickey, delay=0.001):
     
     print(f"Перемещение с {CURRENT_MOTOR_ANGLE}° на {target_degree}° ({degrees}°, {direction}, {steps_to_take} шагов)...")
     
+# 3. Выполняем шаги
+    current_step = 0 
+
     for _ in range(steps_to_take):
-        for i in range(8):
-            for j in range(4):
-                if step_sequence[i][j] == 0:
-                    kit._pca.channels[MOTOR_PINS[j]].duty_cycle = 0
-                else:
-                    kit._pca.channels[MOTOR_PINS[j]].duty_cycle = 65535
-            
-        time.sleep(delay)
-        current_step += 1
+        # 1. Определяем, какой из 8 микро-шагов нужно выполнить сейчас
+        step_index = current_step % 8 
+        pins_on_off = step_sequence[step_index] # Получаем комбинацию [1, 0, 0, 0] и т.п.
+
+        # 2. Подаем эту комбинацию на 4 пина PCA9685
+        for j in range(4):
+            pca_channel = MOTOR_PINS[j]
+            if pins_on_off[j] == 1:
+                kit._pca.channels[pca_channel].duty_cycle = 65535
+            else:
+                kit._pca.channels[pca_channel].duty_cycle = 0
+        
+    time.sleep(delay)
+    
+    # 3. Увеличиваем счетчик, чтобы на следующей итерации взять следующую комбинацию
+    current_step += 1 
         
     # 4. Выключаем пины и обновляем текущий угол
     for pin in MOTOR_PINS:
