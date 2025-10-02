@@ -97,15 +97,15 @@ def rotateM(MOTOR_PINS, target_degree, CURRENT_MOTOR_ANGLE, delay=0.001):
 
 
 kit = ServoKit(channels=16, address=0x40) # Initialize servo controller
-servo = AngularServo(18,min_angle=-90, max_angle=90, min_pulse_width=0.0006, max_pulse_width=0.0024)
+# servo = AngularServo(18,min_angle=-90, max_angle=90, min_pulse_width=0.0006, max_pulse_width=0.0024)
 TILT_CHANNEL, LASER_CHANNEL  =  0, 1 # Channels for servo control
 PAN_ANGLE_MIN, PAN_ANGLE_MAX = 5, 175 # Servo angles range of motion
 TILT_ANGLE_MIN, TILT_ANGLE_MAX = 5, 175
 pan_angle = 90 # Set initial angles for servos
 tilt_angle = 90
-servo.angle(tilt_angle)
+# servo.angle(tilt_angle)
 # kit.servo[PAN_CHANNEL].angle = pan_angle # Move servos to initial angle
-# kit.servo[TILT_CHANNEL].angle = tilt_angle
+kit.servo[TILT_CHANNEL].angle = tilt_angle
 # kit._pca.channels[LASER_CHANNEL].duty_cycle = 0 #from 0 to 65535
 
 face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml') #Model used
@@ -166,8 +166,8 @@ while True:
         if abs(tilt_error)>setpoint:
             tilt_output, tilt_integral, tilt_last_time = calculate_pid(tilt_error, TILT_KP, TILT_KI, TILT_KD, tilt_integral, tilt_last_time, tilt_error_prior)
             tilt_angle = np.clip(tilt_angle + tilt_output, TILT_ANGLE_MIN, TILT_ANGLE_MAX) # Adjust tilt angles based on PID output
-            # kit.servo[1].angle =tilt_angle
-            servo.angle(tilt_angle+90)
+            kit.servo[1].angle =tilt_angle
+            # servo.angle(tilt_angle+90)
             
         if abs(pan_error)<setpoint and abs(tilt_error)<setpoint: 
             inTarget=inTarget+1
@@ -198,8 +198,8 @@ while True:
         break
 
 rotateM(XMOTOR,90,XMCURRENT_MOTOR_ANGLE) # Reset the servos to their starting positions and turn off laser
-servo.angle(0)
-# kit.servo[TILT_CHANNEL].angle = 90
+# servo.angle(0)
+kit.servo[TILT_CHANNEL].angle = 90
 kit._pca.channels[LASER_CHANNEL].duty_cycle = 0
 cap.release() # Release the video capture and clean up
 cv2.destroyAllWindows()
