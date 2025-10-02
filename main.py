@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import time
 from adafruit_servokit import ServoKit
-import RPi.GPIO as GPIO # <-- 1. Импортируем библиотеку для GPIO
+import RPi.GPIO as GPIO 
 
 # --- НАСТРОЙКИ ШАГОВОГО ДВИГАТЕЛЯ ---
 # Укажите пины GPIO, к которым подключены IN1, IN2, IN3, IN4 драйвера
@@ -11,7 +11,8 @@ STEPPER_PINS = [17, 18, 27, 22]
 STEP_DELAY = 0.001 
 
 # Последовательность для полушагового режима (8 шагов) для более плавного движения
-SEQ = [
+# ЭТО ПОСЛЕДОВАТЕЛЬНОСТЬ ДЛЯ ДВИЖЕНИЯ ВПЕРЕД (НАПРИМЕР, ПО ЧАСОВОЙ СТРЕЛКЕ)
+SEQ_FORWARD = [
     [1, 0, 0, 0],
     [1, 1, 0, 0],
     [0, 1, 0, 0],
@@ -21,9 +22,8 @@ SEQ = [
     [0, 0, 0, 1],
     [1, 0, 0, 1]
 ]
-
-# Глобальная переменная для отслеживания текущего шага в последовательности
-stepper_seq_index = 0
+# ОБРАТНАЯ ПОСЛЕДОВАТЕЛЬНОСТЬ (Против часовой стрелки) - отзеркаливаем массив
+SEQ_BACKWARD = SEQ_FORWARD[::-1] 
 
 # Настройка GPIO
 GPIO.setmode(GPIO.BCM)
@@ -34,12 +34,8 @@ for pin in STEPPER_PINS:
 
 # --- ИСХОДНЫЕ НАСТРОЙКИ ---
 kit = ServoKit(channels=16, address=0x6F)
-
-# Каналы для серво (вертикаль) и лазера. Горизонталь теперь на GPIO.
 TILT_CHANNEL, LASER_CHANNEL = 1, 15 
 TILT_ANGLE_MIN, TILT_ANGLE_MAX = 50, 120
-
-# Начальный угол только для серво вертикали
 tilt_angle = 75
 kit.servo[TILT_CHANNEL].angle = tilt_angle
 kit._pca.channels[LASER_CHANNEL].duty_cycle = 0
@@ -50,9 +46,8 @@ cols, rows = 640, 480
 setpoint = cols // 40
 
 # --- НАСТРОЙКИ PID-РЕГУЛЯТОРОВ ---
-# !! ВАЖНО: Коэффициент KP для шагового двигателя нужно подобрать заново!
-# Он теперь влияет на количество шагов, а не на угол. Начните с малых значений.
-PAN_KP_STEPPER, PAN_KI, PAN_KD = 0.05, 0.0, 0.0 
+# !! ВАЖНО: Увеличен KP для более уверенного движения шагового двигателя
+PAN_KP_STEPPER, PAN_KI, PAN_KD = 0.1, 0.0, 0.0 
 TILT_KP, TILT_KI, TILT_KD = 0.008, 0.0, 0.0
 
 pan_integral = 0.0
@@ -66,33 +61,40 @@ tilt_error_prior = 0.0
 inTarget = 0 
 
 # --- ФУНКЦИИ ---
-
-# 2. Новая функция для управления шаговым двигателем
+# ИЗМЕНЕННАЯ ФУНКЦИЯ: УДАЛЕНА ГЛОБАЛЬНАЯ ПЕРЕМЕННАЯ ИНДЕКСА.
 def move_stepper(steps, direction):
     """
     Вращает шаговый двигатель на заданное количество шагов.
-    steps: количество шагов (int)
-    direction: 1 для вращения по часовой стрелке, -1 - против.
+    steps: количество шагов (int), должно быть положительным.
+    direction: 1 для вращения вперед (SEQ_FORWARD), -1 - назад (SEQ_BACKWARD).
     """
-    global stepper_seq_index
-    num_steps = abs(steps)
     
-    for _ in range(num_steps):
-        # Обновляем индекс в последовательности с учетом направления
-        stepper_seq_index += direction
+    # 1. Выбираем нужную последовательность шагов
+    if direction == 1:
+        sequence = SEQ_FORWARD
+    elif direction == -1:
+        sequence = SEQ_BACKWARD
+    else:
+        return # Если направление не 1 или -1, ничего не делаем
+
+    num_steps = abs(steps)
+    seq_len = len(sequence)
+    
+    # 2. Перемещаемся по выбранной последовательности
+    for i in range(num_steps):
+        # Используем оператор % для циклического прохода по последовательности
+        step_pattern = sequence[i % seq_len]
         
-        # Зацикливаем индекс, если он выходит за пределы (0-7)
-        if stepper_seq_index >= len(SEQ):
-            stepper_seq_index = 0
-        elif stepper_seq_index < 0:
-            stepper_seq_index = len(SEQ) - 1
-            
-        # Устанавливаем пины в соответствии с текущим шагом последовательности
-        step_pattern = SEQ[stepper_seq_index]
+        # Устанавливаем пины в соответствии с текущим шагом
         for pin_index, pin_value in enumerate(step_pattern):
             GPIO.output(STEPPER_PINS[pin_index], pin_value)
             
         time.sleep(STEP_DELAY)
+
+    # 3. После движения ОБЯЗАТЕЛЬНО отключаем пины для экономии энергии и предотвращения перегрева
+    for pin in STEPPER_PINS:
+        GPIO.output(pin, 0)
+
 
 def calculate_pid(error, kp, ki, kd, integral, last_time, error_prior):
     current_time = time.time()
@@ -132,20 +134,22 @@ try:
             pan_error = face_center_x - cols // 2
             tilt_error = face_center_y - rows // 2
 
-            # 3. Измененная логика для оси PAN (горизонталь)
+            # ИЗМЕНЕННАЯ ЛОГИКА ВЫЗОВА ДЛЯ ОСИ PAN
             if abs(pan_error) > setpoint:
                 pan_output, pan_integral, pan_last_time = calculate_pid(
                     pan_error, PAN_KP_STEPPER, PAN_KI, PAN_KD, pan_integral, pan_last_time, pan_error_prior
                 )
                 
-                # pan_output теперь - это желаемое количество шагов
                 steps_to_move = int(pan_output)
                 
                 # Определяем направление и двигаем мотор
                 if steps_to_move > 0:
-                    move_stepper(steps_to_move, 1) # Двигаем "вправо" (направление подбирается)
+                    # Положительная ошибка (лицо справа): двигаем мотор в сторону SEQ_BACKWARD (или FORWARD, зависит от проводки)
+                    # Выберите 1 или -1, чтобы двигатель преследовал цель.
+                    move_stepper(abs(steps_to_move), -1) 
                 elif steps_to_move < 0:
-                    move_stepper(steps_to_move, -1) # Двигаем "влево"
+                    # Отрицательная ошибка (лицо слева): двигаем мотор в противоположную сторону
+                    move_stepper(abs(steps_to_move), 1) 
             
             # Логика для TILT (вертикаль) осталась прежней
             if abs(tilt_error) > setpoint:
@@ -187,9 +191,8 @@ try:
         
         if cv2.waitKey(1) & 0xFF == 27: # ESC для выхода
             break
-
 finally:
-    # 4. Обязательная очистка GPIO и сброс оборудования при выходе
+    # Обязательная очистка GPIO и сброс оборудования при выходе
     print("Завершение работы...")
     GPIO.cleanup()
     kit.servo[TILT_CHANNEL].angle = 90
