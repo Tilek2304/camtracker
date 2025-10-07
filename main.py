@@ -4,7 +4,9 @@ import time
 import pygame.mixer
 from adafruit_servokit import ServoKit
 from datetime import datetime
-kit = ServoKit(channels=16, address=0x6F) # Initialize servo controller
+import subprocess
+import os
+kit = ServoKit(channels=16, address=0x40) # Initialize servo controller
 
 PAN_CHANNEL,TILT_CHANNEL, LASER_CHANNEL  = 0, 1, 15 # Channels for servo control
 
@@ -61,38 +63,57 @@ cTime = 0.0
 fps=0.0
 start_dt = datetime.now()
 
+
+VLC_PROCESS = None 
+MUSIC_FILE = '/путь/к/вашему/файлу.mp3' # <-- Укажите свой путь
+def start_alert():
+    global VLC_PROCESS
+    stop_alert()
+    try:
+        VLC_PROCESS = subprocess.Popen(['cvlc', '-I', 'dummy', '--play-and-exit', MUSIC_FILE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"Оповещение запущено (PID: {VLC_PROCESS.pid})")
+    except FileNotFoundError:
+        print("ОШИБКА: Команда 'cvlc' не найдена. Установите VLC.")
+
+
+def stop_alert():
+    global VLC_PROCESS
+    
+    if VLC_PROCESS is not None:
+        if VLC_PROCESS.poll() is None: 
+            print(f"Прерывание оповещения (PID: {VLC_PROCESS.pid}).")
+            VLC_PROCESS.terminate() # Вежливое завершение
+            try:
+                VLC_PROCESS.wait(timeout=0.1) 
+            except subprocess.TimeoutExpired:
+                VLC_PROCESS.kill() # Жесткое завершение, если не сработало
+                print("Процесс VLC был убит.")
+        VLC_PROCESS = None # Сбрасываем переменную после завершения
+
+# start_alert() 
+# time.sleep(0.3) 
+# stop_alert() 
+# print("Программа продолжает работу.")
+
+
+
+
 def action():
     print('Приветствие')
     kit.servo[2].angle = 90
-    kit.servo[3].angle = 70
-    kit.servo[4].angle = 70
-    kit.servo[5].angle = 60
-    kit.servo[6].angle = 0
-    time.sleep(2)
-    kit.servo[2].angle = 90
-    kit.servo[3].angle = 70
-    kit.servo[4].angle = 90
-    kit.servo[5].angle = 90
-    kit.servo[6].angle = 0
-    time.sleep(2)    
-    kit.servo[2].angle = 90
-    kit.servo[3].angle = 70
-    kit.servo[4].angle = 70
-    kit.servo[5].angle = 60
-    kit.servo[6].angle = 0
-    time.sleep(2)
-    kit.servo[2].angle = 90
-    kit.servo[3].angle = 70
-    kit.servo[4].angle = 90
-    kit.servo[5].angle = 90
-    kit.servo[6].angle = 0
-    time.sleep(2)
-    kit.servo[2].angle = 90
-    kit.servo[3].angle = 120
-    kit.servo[4].angle = 90
-    kit.servo[5].angle = 90
-    kit.servo[6].angle = 90
-    time.sleep(2)
+    kit.servo[4].angle = 10
+    kit.servo[7].angle = 90
+    for i in range(30,50):
+        kit.servo[5].angle = i
+        kit.servo[6].angle = i
+        time.sleep(0.001)
+    time.sleep(1)
+    for i in range(50,30,-1):
+        kit.servo[6].angle = i
+        kit.servo[5].angle = i
+        time.sleep(0.001)
+    time.sleep(1)
+
 
 
 
@@ -104,8 +125,9 @@ while True:
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) # Convert the frame to grayscalen
     faces = face_cascade.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=5) # Perform face detection    
     end_dt = datetime.now()
-    if (end_dt -start_dt)>sleep and faces:
-        audio.play()
+    if (end_dt -start_dt)>sleep:
+        start_alert()
+        time.sleep(2)
         start_dt = end_dt
         action()
     for (x, y, w, h) in faces:
